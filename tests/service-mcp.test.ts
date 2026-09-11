@@ -9,7 +9,7 @@
  * second context against the same registry file.
  */
 import { Context, Service } from '@deepseek-ai/cordis'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -29,6 +29,8 @@ class FakeLoader extends Service {
   /** Root-tree store: exactly the entries this process created at the root. */
   readonly store: Record<string, FakeEntry> = {}
   readonly mounted: FakeEntry[] = []
+  /** Ids created through `create()`, in order — a respawn shows up as a new entry. */
+  readonly created: string[] = []
   /** Ids the fake refuses to create, to exercise restore-failure paths. */
   readonly refuse = new Set<string>()
 
@@ -50,6 +52,7 @@ class FakeLoader extends Service {
     if (this.refuse.has(String(options.id))) throw new Error(`refused ${options.id}`)
     const entry = this.mount(options)
     this.store[entry.id] = entry
+    this.created.push(entry.id)
     return entry.id
   }
 
@@ -95,17 +98,34 @@ class FakeTools extends Service {
 async function boot(
   storePath: string,
   prepare?: (loader: FakeLoader) => void,
-): Promise<{ loader: FakeLoader, service: SkillMcpService }> {
+  config: { restoreWorkspaceBinding?: boolean } = {},
+): Promise<{ ctx: Context, loader: FakeLoader, service: SkillMcpService }> {
   const ctx = new Context()
   const loader = new FakeLoader(ctx)
   new FakeTools(ctx)
   // Entries a profile config file provides exist before the center initializes.
   prepare?.(loader)
-  const fiber = ctx.plugin(SkillMcpService, { storePath })
+  const fiber = ctx.plugin(SkillMcpService, { storePath, ...config })
   await fiber.await()
   const service = ctx.get('skillMcp') as SkillMcpService | undefined
   if (service === undefined) throw new Error('skillMcp service missing')
-  return { loader, service }
+  return { ctx, loader, service }
+}
+
+/**
+ * Run one agent step for a session whose workspace is `cwd`, the way the agent
+ * loop dispatches it: `events.waterfall('agent/pre-step', payload, next)`.
+ */
+async function stepInWorkspace(ctx: Context, cwd: string): Promise<void> {
+  const waterfall = (ctx.events as unknown as {
+    waterfall: (name: string, payload: unknown, next: () => Promise<unknown>) => Promise<unknown>
+  }).waterfall.bind(ctx.events)
+  await waterfall('agent/pre-step', { agent: { session: { header: { cwd } } }, messages: [], step: 1 }, async () => ({ kind: 'enter' }))
+}
+
+/** A workspace directory that really exists (bindings are validated against disk). */
+async function workspaceDirectory(name: string): Promise<string> {
+  return await mkdtemp(join(tmpdir(), `skill-mcp-ws-${name}-`))
 }
 
 /** Read the durable registry straight off disk, as another process would. */
@@ -285,5 +305,159 @@ describe('MCP 管理与持久化', () => {
     expect(await second.service.mcpStatus()).toEqual([
       expect.objectContaining({ serverName: 'filesystem', toolCount: 0, connected: false, fiberPhase: null }),
     ])
+  })
+})
+
+describe('MCP 绑定 workspace（cwd 跟随当前项目）', () => {
+  const codegraphRow = {
+    serverName: 'codegraph',
+    transport: 'stdio' as const,
+    scope: 'workspace' as const,
+    command: 'codegraph',
+    args: ['serve', '--mcp'],
+  }
+
+  it('scope=workspace：等首个会话给出项目后才启动，cwd 就是该项目', async () => {
+    const storePath = await temporaryStore()
+    const { ctx, loader, service } = await boot(storePath)
+    await service.createMcpServer(codegraphRow)
+    // 还没有任何会话 → 不启动（避免用 launch-root 起一个没用的进程）
+    expect(loader.mounted).toEqual([])
+    expect(await service.listMcpServers()).toEqual([
+      expect.objectContaining({ serverName: 'codegraph', scope: 'workspace', boundWorkspace: undefined, workspace: undefined }),
+    ])
+
+    const projectA = await workspaceDirectory('a')
+    await stepInWorkspace(ctx, projectA)
+    expect(loader.mounted.map(entry => entry.id)).toEqual(['mcp-codegraph'])
+    expect(loader.mounted[0]!.options.config).toMatchObject({ cwd: projectA })
+    expect((await registryOnDisk(storePath)).servers[0]).toMatchObject({ scope: 'workspace', boundWorkspace: projectA })
+  })
+
+  it('切换项目 → entry 重启并指向新项目；同一项目重复 step 不重启', async () => {
+    const storePath = await temporaryStore()
+    const { ctx, loader, service } = await boot(storePath)
+    await service.createMcpServer(codegraphRow)
+    const projectA = await workspaceDirectory('a')
+    const projectB = await workspaceDirectory('b')
+
+    await stepInWorkspace(ctx, projectA)
+    expect(loader.mounted.length).toBe(1)
+
+    await stepInWorkspace(ctx, projectA)
+    expect(loader.created.length).toBe(1) // 同一 workspace：不重启
+
+    await stepInWorkspace(ctx, projectB)
+    expect(loader.created.length).toBe(2) // 换项目：重启
+    expect(loader.mounted.length).toBe(1)
+    expect(loader.mounted[0]!.options.config).toMatchObject({ cwd: projectB })
+    expect((await registryOnDisk(storePath)).servers[0]).toMatchObject({ boundWorkspace: projectB })
+  })
+
+  it('重启进程：沿用 boundWorkspace 直接绑定（不必等新会话）', async () => {
+    const storePath = await temporaryStore()
+    const project = await workspaceDirectory('keep')
+    const first = await boot(storePath)
+    await first.service.createMcpServer(codegraphRow)
+    await stepInWorkspace(first.ctx, project)
+
+    const second = await boot(storePath)
+    expect(second.loader.created.length).toBe(1)
+    expect(second.loader.mounted[0]!.options.config).toMatchObject({ cwd: project })
+    expect((await second.service.listMcpServers())[0]).toMatchObject({ boundWorkspace: project, workspace: project })
+  })
+
+  it('boundWorkspace 已不存在（项目被删/搬走）→ 丢弃绑定并等待新会话', async () => {
+    const storePath = await temporaryStore()
+    const project = await workspaceDirectory('gone')
+    const first = await boot(storePath)
+    await first.service.createMcpServer(codegraphRow)
+    await stepInWorkspace(first.ctx, project)
+    await rm(project, { recursive: true, force: true })
+
+    const second = await boot(storePath)
+    expect(second.loader.mounted).toEqual([])
+    expect((await registryOnDisk(storePath)).servers[0]).not.toHaveProperty('boundWorkspace')
+
+    const fresh = await workspaceDirectory('fresh')
+    await stepInWorkspace(second.ctx, fresh)
+    expect(second.loader.mounted[0]!.options.config).toMatchObject({ cwd: fresh })
+  })
+
+  it('{workspace} 占位符：global 行也能跟随，且切换项目会重启', async () => {
+    const storePath = await temporaryStore()
+    const { ctx, loader, service } = await boot(storePath)
+    await service.createMcpServer({
+      serverName: 'indexer',
+      transport: 'stdio',
+      command: 'indexer',
+      args: ['--root', '{workspace}', '--watch'],
+    })
+    const projectA = await workspaceDirectory('a')
+    const projectB = await workspaceDirectory('b')
+    await stepInWorkspace(ctx, projectA)
+    expect(loader.mounted[0]!.options.config).toMatchObject({ args: ['--root', projectA, '--watch'] })
+    await stepInWorkspace(ctx, projectB)
+    expect(loader.created.length).toBe(2)
+    expect(loader.mounted[0]!.options.config).toMatchObject({ args: ['--root', projectB, '--watch'] })
+  })
+
+  it('普通 global 行不随项目切换重启', async () => {
+    const storePath = await temporaryStore()
+    const { ctx, loader, service } = await boot(storePath)
+    await service.createMcpServer(filesystemConfig)
+    expect(loader.created.length).toBe(1)
+    await stepInWorkspace(ctx, await workspaceDirectory('a'))
+    await stepInWorkspace(ctx, await workspaceDirectory('b'))
+    expect(loader.created.length).toBe(1)
+    expect(loader.mounted.length).toBe(1)
+  })
+
+  it('停用的 workspace 行：不启动进程、不因换项目重启，只记绑定；启用时按最新绑定启动', async () => {
+    const storePath = await temporaryStore()
+    const { ctx, loader, service } = await boot(storePath)
+    await service.createMcpServer(codegraphRow)
+    await service.setMcpServerEnabled('mcp-codegraph', false)
+
+    const projectA = await workspaceDirectory('a')
+    await stepInWorkspace(ctx, projectA)
+    // 停用 = 没有进程可指向：不建 entry，只把绑定记下来
+    expect(loader.mounted).toEqual([])
+    expect(loader.created).toEqual([])
+    expect((await registryOnDisk(storePath)).servers[0]).toMatchObject({ disabled: true, boundWorkspace: projectA })
+
+    const projectB = await workspaceDirectory('b')
+    await stepInWorkspace(ctx, projectB)
+    expect(loader.created).toEqual([])
+    expect((await registryOnDisk(storePath)).servers[0]).toMatchObject({ boundWorkspace: projectB })
+
+    await service.setMcpServerEnabled('mcp-codegraph', true)
+    expect(loader.mounted.length).toBe(1)
+    expect(loader.mounted[0]!.disabled).toBe(false)
+    expect(loader.mounted[0]!.options.config).toMatchObject({ cwd: projectB })
+  })
+
+  it('setMcpServerWorkspace：不经过会话也能指定项目', async () => {
+    const storePath = await temporaryStore()
+    const { loader, service } = await boot(storePath)
+    await service.createMcpServer(codegraphRow)
+    const project = await workspaceDirectory('manual')
+    await service.setMcpServerWorkspace('mcp-codegraph', project)
+    expect(loader.mounted[0]!.options.config).toMatchObject({ cwd: project })
+    await expect(service.setMcpServerWorkspace('mcp-nope', project)).rejects.toThrow('mcp-server-file-managed')
+  })
+
+  it('cwd 里显式写 {workspace} 之外的固定路径仍可用（子目录）', async () => {
+    const storePath = await temporaryStore()
+    const { ctx, loader, service } = await boot(storePath)
+    await service.createMcpServer({
+      serverName: 'sub',
+      transport: 'stdio',
+      command: 'tool',
+      cwd: join('{workspace}', 'packages', 'app'),
+    })
+    const project = await workspaceDirectory('mono')
+    await stepInWorkspace(ctx, project)
+    expect(loader.mounted[0]!.options.config).toMatchObject({ cwd: join(project, 'packages', 'app') })
   })
 })

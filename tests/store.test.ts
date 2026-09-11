@@ -4,11 +4,14 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   McpServerStore,
+  effectiveStoredServer,
   fullMcpConfig,
+  isWorkspaceBound,
   mcpServerEntryId,
   mcpStorePath,
   normalizeStoredServer,
   reconcileStoredServers,
+  spawnableRow,
   type StoredMcpServer,
 } from '../src/store.ts'
 
@@ -122,6 +125,60 @@ describe('fullMcpConfig', () => {
     expect(fullMcpConfig({ serverName: 'web', transport: 'streamable-http', url: 'u' })).toMatchObject({
       transport: 'streamable-http', serverName: 'web', url: 'u', headers: {},
     })
+  })
+})
+
+describe('workspace binding（cwd theo workspace）', () => {
+  const project = 'C:\\work\\project-a'
+  const scoped: StoredMcpServer = { serverName: 'codegraph', transport: 'stdio', command: 'codegraph', args: ['serve', '--mcp'], scope: 'workspace', disabled: false }
+
+  it('scope=workspace 且无 cwd → cwd chính là workspace', () => {
+    expect(effectiveStoredServer(scoped, project)).toMatchObject({ cwd: project })
+  })
+
+  it('scope=workspace nhưng chưa biết workspace → giữ nguyên, không spawn được', () => {
+    expect(effectiveStoredServer(scoped, undefined)).toEqual(scoped)
+    expect(spawnableRow(scoped, undefined)).toBe(false)
+    expect(spawnableRow(scoped, project)).toBe(true)
+  })
+
+  it('token {workspace} trong args và cwd (kể cả ghép đường dẫn con)', () => {
+    const row: StoredMcpServer = {
+      serverName: 'indexer',
+      transport: 'stdio',
+      command: 'x',
+      args: ['--root', '{workspace}', '--cache', '{workspace}\\.cache'],
+      cwd: '{workspace}\\packages\\app',
+      disabled: false,
+    }
+    const effective = effectiveStoredServer(row, project)
+    expect(effective.args).toEqual(['--root', project, '--cache', `${project}\\.cache`])
+    expect(effective.cwd).toBe(`${project}\\packages\\app`)
+    expect(spawnableRow(row, project)).toBe(true)
+  })
+
+  it('token còn sót (chưa biết workspace) → không spawn (không đưa token thô cho server)', () => {
+    const row: StoredMcpServer = { serverName: 'i', transport: 'stdio', command: 'x', args: ['--root', '{workspace}'], disabled: false }
+    expect(spawnableRow(row, undefined)).toBe(false)
+  })
+
+  it('row global thường không bị coi là workspace-bound', () => {
+    expect(isWorkspaceBound(stdioRow)).toBe(false)
+    expect(isWorkspaceBound(scoped)).toBe(true)
+    expect(effectiveStoredServer(stdioRow, project)).toEqual(stdioRow)
+  })
+
+  it('boundWorkspace được dùng khi lần spawn sau không truyền workspace', () => {
+    const bound: StoredMcpServer = { ...scoped, boundWorkspace: project }
+    expect(effectiveStoredServer(bound, undefined)).toMatchObject({ cwd: project })
+    expect(spawnableRow(bound, undefined)).toBe(true)
+  })
+
+  it('round-trip giữ scope + boundWorkspace', async () => {
+    const file = join(await temporaryDirectory(), 'mcp-servers.json')
+    const bound: StoredMcpServer = { ...scoped, boundWorkspace: project }
+    await new McpServerStore(file).save([bound])
+    expect(await new McpServerStore(file).load()).toEqual([bound])
   })
 })
 

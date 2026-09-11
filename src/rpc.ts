@@ -47,6 +47,11 @@ export class SkillMcpRpc extends Service {
             return { ok: true, value: await ctx.skillMcp.removeMcpServer(String(p.id)) }
           case 'setMcpServerEnabled':
             return { ok: true, value: await ctx.skillMcp.setMcpServerEnabled(String(p.id), p.enabled === true) }
+          case 'setMcpServerWorkspace': {
+            const workspace = p.workspace
+            if (typeof workspace !== 'string' || workspace === '') return internal('setMcpServerWorkspace: workspace is required')
+            return { ok: true, value: await ctx.skillMcp.setMcpServerWorkspace(String(p.id), workspace) }
+          }
           case 'mcpStatus':
             return { ok: true, value: await ctx.skillMcp.mcpStatus() }
           default:

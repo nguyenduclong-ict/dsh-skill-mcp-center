@@ -21,6 +21,21 @@ import { dirname, join } from 'node:path'
 /** Transport discriminant of an `mcp-client` server. */
 export type McpTransport = 'stdio' | 'streamable-http'
 
+/**
+ * How a row's working directory is decided.
+ *
+ * `global` (default) — whatever `cwd` the row carries; an empty `cwd` inherits
+ * the harness process directory.
+ * `workspace` — the entry is (re)spawned with `cwd` bound to the workspace of
+ * the session that is working, so per-project servers (codegraph, language
+ * servers, per-repo tooling) look at the project the user actually has open
+ * instead of the launcher's directory.
+ */
+export type McpScope = 'global' | 'workspace'
+
+/** Placeholder replaced with the bound workspace path in `cwd` and `args`. */
+export const WORKSPACE_TOKEN = '{workspace}'
+
 /** Client-supplied MCP server config, normalized to the mcp-client shape. */
 export interface McpConfig {
   serverName: string
@@ -30,11 +45,18 @@ export interface McpConfig {
   cwd?: string
   url?: string
   headers?: Record<string, string>
+  /** Working-directory policy; see {@link McpScope}. */
+  scope?: McpScope
 }
 
-/** One durable server row: the mcp-client config plus its enable/disable state. */
+/**
+ * One durable server row: the mcp-client config plus its enable/disable state,
+ * its working-directory policy, and the workspace it was last bound to.
+ */
 export interface StoredMcpServer extends McpConfig {
   disabled: boolean
+  /** Host-managed: last workspace a `workspace`-scoped (or `{workspace}`-using) row was spawned for. */
+  boundWorkspace?: string
 }
 
 /** On-disk store document. */
@@ -113,6 +135,8 @@ export function normalizeStoredServer(input: unknown): StoredMcpServer {
   if (!SERVER_NAME_RE.test(serverName)) throw new Error('mcp-server-name-invalid')
   const transport = raw.transport === 'streamable-http' ? 'streamable-http' : 'stdio'
   const row: StoredMcpServer = { serverName, transport, disabled: raw.disabled === true }
+  if (raw.scope === 'workspace') row.scope = 'workspace'
+  if (typeof raw.boundWorkspace === 'string' && raw.boundWorkspace !== '') row.boundWorkspace = raw.boundWorkspace
   if (transport === 'stdio') {
     if (typeof raw.command === 'string') row.command = raw.command
     const args = stringArray(raw.args)
@@ -124,6 +148,66 @@ export function normalizeStoredServer(input: unknown): StoredMcpServer {
     if (Object.keys(headers).length > 0) row.headers = headers
   }
   return row
+}
+
+/** Replace every {@link WORKSPACE_TOKEN} occurrence in one string. */
+function fillToken(value: string, workspace: string): string {
+  return value.split(WORKSPACE_TOKEN).join(workspace)
+}
+
+/** Whether a row's raw config still asks for a workspace it has not been given. */
+function usesWorkspaceToken(row: StoredMcpServer): boolean {
+  if (row.cwd?.includes(WORKSPACE_TOKEN) === true) return true
+  return (row.args ?? []).some(arg => arg.includes(WORKSPACE_TOKEN))
+}
+
+/**
+ * The workspace a row should be spawned for, or undefined when it does not need
+ * one. `workspace`-scoped rows always want one; other rows want one only when
+ * their `cwd`/`args` carry the `{workspace}` token.
+ */
+export function workspaceBindingOf(row: StoredMcpServer, workspace?: string): string | undefined {
+  if (workspace !== undefined && workspace !== '') return workspace
+  if (row.boundWorkspace !== undefined) return row.boundWorkspace
+  return undefined
+}
+
+/** Whether the row is tied to a workspace at all (scoped or token-using). */
+export function isWorkspaceBound(row: StoredMcpServer): boolean {
+  return row.scope === 'workspace' || usesWorkspaceToken(row)
+}
+
+/**
+ * The effective `cwd`/`args` for one row under a workspace, in the stored row's
+ * own shape (before {@link fullMcpConfig} fills defaults).
+ *
+ * A `workspace`-scoped row with no explicit `cwd` is pointed at the workspace
+ * itself — that is what makes `codegraph serve --mcp` (no `--path`) find the
+ * open project's `.codegraph/` index instead of the launcher's directory.
+ */
+export function effectiveStoredServer(row: StoredMcpServer, workspace?: string): StoredMcpServer {
+  const binding = workspaceBindingOf(row, workspace)
+  if (binding === undefined) return row
+  const next: StoredMcpServer = { ...row }
+  if (next.args !== undefined) next.args = next.args.map(arg => fillToken(arg, binding))
+  if (next.cwd !== undefined) {
+    next.cwd = fillToken(next.cwd, binding)
+  } else if (next.scope === 'workspace' && next.transport === 'stdio') {
+    next.cwd = binding
+  }
+  return next
+}
+
+/**
+ * Whether a row can be spawned at all: a workspace-bound row must have a
+ * concrete workspace, and no `{workspace}` token may survive into the spawn
+ * arguments (a literal token would be handed to the server as a path).
+ */
+export function spawnableRow(row: StoredMcpServer, workspace?: string): boolean {
+  const effective = effectiveStoredServer(row, workspace)
+  if (isWorkspaceBound(row) && workspaceBindingOf(row, workspace) === undefined) return false
+  if (effective.cwd?.includes(WORKSPACE_TOKEN) === true) return false
+  return (effective.args ?? []).every(arg => !arg.includes(WORKSPACE_TOKEN))
 }
 
 /**
@@ -213,13 +297,19 @@ export interface ReconcileReport {
  * Called once per process, after the loader is mounted: this is what turns the
  * durable registry back into connected MCP servers on a fresh DSH start. An id
  * that is already live is left alone — a row that a profile config file owns
- * keeps its own entry. One server that cannot start never blocks the others.
+ * keeps its own entry. A workspace-bound row with no workspace yet is skipped
+ * (the first `agent/pre-step` binds it); a row that cannot start never blocks
+ * the others.
+ *
+ * @param workspace - the workspace to bind workspace-scoped rows to, when one is
+ * already known (typically the row's own last binding, persisted at shutdown).
  */
 export async function reconcileStoredServers(
   servers: readonly StoredMcpServer[],
   loader: McpLoaderLike,
   entryName: string,
   warn: (format: unknown, ...param: unknown[]) => void = () => {},
+  workspace?: string,
 ): Promise<ReconcileReport> {
   const live = new Set<string>()
   for (const entry of loader.entries()) {
@@ -232,11 +322,12 @@ export async function reconcileStoredServers(
       report.alreadyLive.push(id)
       continue
     }
+    if (!spawnableRow(server, workspace)) continue
     try {
       await loader.create({
         id,
         name: entryName,
-        config: fullMcpConfig(server),
+        config: fullMcpConfig(effectiveStoredServer(server, workspace)),
         disabled: server.disabled ? true : null,
       })
       report.created.push(id)

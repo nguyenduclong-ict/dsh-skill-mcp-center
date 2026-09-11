@@ -12,6 +12,7 @@ Skill 与 MCP 管理中心：在设置里管理 skills 与 MCP 服务器，右�
 
 - **Skill management / Skill 管理** — browse every skill by tier (system / user / workspace / runtime), toggle model invocation via the `disable-model-invocation` frontmatter (disk-backed skills only).
 - **MCP management / MCP 管理** — add / edit / remove `mcp-client` servers, enable/disable without deleting config, all **hot-applied** through `ctx.loader` (no restart) **and persisted**: the definitions live in a durable registry and are rebuilt as live entries at every start, so they survive an app restart (v0.4.3 fix — a root loader entry alone is in-memory only).
+- **Workspace-scoped servers / 跟随 workspace** — a server can follow the project the session is working in: set its working directory to *follow workspace* (or put the `{workspace}` placeholder in `cwd`/`args`) and its entry is respawned with that path whenever the active project changes. This is what makes per-project servers such as `codegraph serve --mcp` look at the open project instead of the launcher's directory (v0.4.4).
 - **Live status / 实时状态** — a sidebar "MCP" tab (via `dsh-better-sidebar`) showing per-server connection state + tool count, polled while visible and following the session.
 - **Skin-compatible / 皮肤兼容** — every color uses `var(--dsw-*)` tokens.
 
@@ -25,6 +26,22 @@ The loader's root entry tree is in-memory (`Loader.write()` is a no-op), so MCP 
 | Live entries | `mcp-client` loader entries created at start by `reconcileStoredServers()` |
 
 Every add / edit / remove / enable writes the registry first, then hot-applies the entry — a failed connect never loses the row, and a corrupt registry file is moved aside as `mcp-servers.json.corrupt-<ts>` instead of being silently dropped. Servers defined by a profile config file (`cordis.patch.yml`) are shown as read-only, because writing them back would rewrite that file.
+
+### Workspace binding / 绑定 workspace
+
+| Row field | Meaning |
+|---|---|
+| `scope: 'workspace'` | The entry is (re)spawned with `cwd` = the workspace of the session that is working |
+| `{workspace}` in `cwd` or `args` | Replaced with that same path (works on any row, e.g. `args: ["serve", "--mcp", "--path", "{workspace}"]`) |
+| `boundWorkspace` | Host-managed: the workspace the row was last bound to, reused on the next start |
+| `scope: 'global'` (default) | Unchanged behaviour: the row keeps its own `cwd` |
+
+The binding follows the session through the `agent/pre-step` waterfall (`agent.session.header.cwd`), so switching projects respawns the server against the new project. A workspace-scoped row that has never been bound is not started at all until the first step picks a project — that is deliberate, since starting it against the launcher's directory is what made `codegraph` report "No CodeGraph project is loaded for this session". Example:
+
+```json
+{ "serverName": "codegraph", "transport": "stdio", "scope": "workspace",
+  "command": "codegraph", "args": ["serve", "--mcp"], "disabled": false }
+```
 
 ## Install / 安装
 

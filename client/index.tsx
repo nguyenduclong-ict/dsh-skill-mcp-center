@@ -210,6 +210,13 @@ const zhDict: Record<string, string> = {
   errMcpServerFileManaged: '该 server 由配置文件管理，请编辑 cordis.patch.yml',
   errMcpServerNameInvalid: 'serverName 非法（[A-Za-z0-9_-]{1,32}）',
   errMcpServerFailed: '操作失败：{e}',
+  scopeLabel: '工作目录',
+  scopeGlobal: '固定（用上面的 cwd）',
+  scopeWorkspace: '跟随 workspace（当前项目）',
+  scopeWorkspaceBadge: '跟随项目',
+  scopeWorkspaceHint: '把 cwd 绑定到当前正在工作的项目目录：切换项目时自动重启该 server。cwd/args 里也可用 {workspace} 占位符。',
+  boundWorkspace: '→ {path}',
+  awaitingWorkspace: '等待首个会话选择项目',
   connected: '已连接',
   notSynced: '未同步',
   failed: 'failed',
@@ -272,6 +279,13 @@ const enDict: Record<string, string> = {
   errMcpServerFileManaged: 'This server is managed by a config file; edit cordis.patch.yml',
   errMcpServerNameInvalid: 'Invalid serverName ([A-Za-z0-9_-]{1,32})',
   errMcpServerFailed: 'Failed: {e}',
+  scopeLabel: 'working directory',
+  scopeGlobal: 'Fixed (use cwd above)',
+  scopeWorkspace: 'Follow workspace (current project)',
+  scopeWorkspaceBadge: 'follows project',
+  scopeWorkspaceHint: 'Bind cwd to the project the session is working in: switching projects respawns this server. {workspace} also works inside cwd/args.',
+  boundWorkspace: '→ {path}',
+  awaitingWorkspace: 'waiting for the first session to pick a project',
   connected: 'Connected',
   notSynced: 'Not synced',
   failed: 'failed',
@@ -318,6 +332,10 @@ interface McpServer {
   fiberPhase: string | null
   /** Host-owned durable row (false = defined by a profile config file). */
   managed: boolean
+  /** 'workspace' = entry is respawned with cwd bound to the working session's project. */
+  scope: 'global' | 'workspace'
+  boundWorkspace?: string
+  workspace?: string
 }
 interface McpServerStatus {
   serverName: string
@@ -617,6 +635,9 @@ function McpView() {
             <span className="smc-badge" title={s.managed ? undefined : t('profileManagedHint')}>
               {s.managed ? t('managedBadge') : t('profileManagedBadge')}
             </span>
+            {s.scope === 'workspace' && (
+              <span className="smc-badge workspace" title={t('scopeWorkspaceHint')}>{t('scopeWorkspaceBadge')}</span>
+            )}
             <span className={`smc-dot${dotCls(s)}`} />
             <span className="smc-spacer" />
             <button type="button" className="smc-btn" disabled={!s.managed} onClick={() => { setEditing(s) }}>{t('edit')}</button>
@@ -631,6 +652,11 @@ function McpView() {
             />
           </div>
           <div className="smc-desc">{s.transport === 'stdio' ? `${s.command ?? ''} ${(s.args ?? []).join(' ')}` : s.url}</div>
+          {s.scope === 'workspace' && (
+            <div className="smc-desc" title={s.workspace ?? s.boundWorkspace}>
+              {t('boundWorkspace', { path: s.workspace ?? s.boundWorkspace ?? t('awaitingWorkspace') })}
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -641,6 +667,7 @@ function ServerForm({ server, onClose, onSaved }: { server: McpServer | null; on
   useLocale()
   const [name, setName] = useState(server?.serverName ?? '')
   const [transport, setTransport] = useState<'stdio' | 'streamable-http'>(server?.transport ?? 'stdio')
+  const [scope, setScope] = useState<'global' | 'workspace'>(server?.scope ?? 'global')
   const [command, setCommand] = useState(server?.command ?? '')
   const [args, setArgs] = useState((server?.args ?? []).join(' '))
   const [cwd, setCwd] = useState(server?.cwd ?? '')
@@ -649,8 +676,8 @@ function ServerForm({ server, onClose, onSaved }: { server: McpServer | null; on
   const save = () => {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) { setError(t('serverNameInvalid')); return }
     const config = transport === 'stdio'
-      ? { serverName: name, transport, command, args: args.split(/\s+/).filter(Boolean), cwd }
-      : { serverName: name, transport, url }
+      ? { serverName: name, transport, scope, command, args: args.split(/\s+/).filter(Boolean), cwd }
+      : { serverName: name, transport, scope, url }
     const call = server === null ? rpc('createMcpServer', { config }) : rpc('updateMcpServer', { id: server.id, config })
     void call.then(
       () => { onSaved(); showToast(server === null ? t('added', { name }) : t('updated', { name })) },
@@ -689,6 +716,16 @@ function ServerForm({ server, onClose, onSaved }: { server: McpServer | null; on
         <div className="smc-field">
           <span className="smc-label">{t('url')}</span>
           <input className="smc-input" value={url} onChange={e => { setUrl(e.target.value) }} placeholder="https://mcp.example.com/xxx" />
+        </div>
+      )}
+      {transport === 'stdio' && (
+        <div className="smc-field">
+          <span className="smc-label">{t('scopeLabel')}</span>
+          <select className="smc-select" value={scope} onChange={e => { setScope(e.target.value as 'global' | 'workspace') }}>
+            <option value="global">{t('scopeGlobal')}</option>
+            <option value="workspace">{t('scopeWorkspace')}</option>
+          </select>
+          {scope === 'workspace' && <span className="smc-desc">{t('scopeWorkspaceHint')}</span>}
         </div>
       )}
       {error !== '' && <div className="smc-error">{error}</div>}

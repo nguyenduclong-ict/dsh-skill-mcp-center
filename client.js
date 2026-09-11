@@ -230,6 +230,13 @@ var zhDict = {
   errMcpServerFileManaged: "\u8BE5 server \u7531\u914D\u7F6E\u6587\u4EF6\u7BA1\u7406\uFF0C\u8BF7\u7F16\u8F91 cordis.patch.yml",
   errMcpServerNameInvalid: "serverName \u975E\u6CD5\uFF08[A-Za-z0-9_-]{1,32}\uFF09",
   errMcpServerFailed: "\u64CD\u4F5C\u5931\u8D25\uFF1A{e}",
+  scopeLabel: "\u5DE5\u4F5C\u76EE\u5F55",
+  scopeGlobal: "\u56FA\u5B9A\uFF08\u7528\u4E0A\u9762\u7684 cwd\uFF09",
+  scopeWorkspace: "\u8DDF\u968F workspace\uFF08\u5F53\u524D\u9879\u76EE\uFF09",
+  scopeWorkspaceBadge: "\u8DDF\u968F\u9879\u76EE",
+  scopeWorkspaceHint: "\u628A cwd \u7ED1\u5B9A\u5230\u5F53\u524D\u6B63\u5728\u5DE5\u4F5C\u7684\u9879\u76EE\u76EE\u5F55\uFF1A\u5207\u6362\u9879\u76EE\u65F6\u81EA\u52A8\u91CD\u542F\u8BE5 server\u3002cwd/args \u91CC\u4E5F\u53EF\u7528 {workspace} \u5360\u4F4D\u7B26\u3002",
+  boundWorkspace: "\u2192 {path}",
+  awaitingWorkspace: "\u7B49\u5F85\u9996\u4E2A\u4F1A\u8BDD\u9009\u62E9\u9879\u76EE",
   connected: "\u5DF2\u8FDE\u63A5",
   notSynced: "\u672A\u540C\u6B65",
   failed: "failed",
@@ -292,6 +299,13 @@ var enDict = {
   errMcpServerFileManaged: "This server is managed by a config file; edit cordis.patch.yml",
   errMcpServerNameInvalid: "Invalid serverName ([A-Za-z0-9_-]{1,32})",
   errMcpServerFailed: "Failed: {e}",
+  scopeLabel: "working directory",
+  scopeGlobal: "Fixed (use cwd above)",
+  scopeWorkspace: "Follow workspace (current project)",
+  scopeWorkspaceBadge: "follows project",
+  scopeWorkspaceHint: "Bind cwd to the project the session is working in: switching projects respawns this server. {workspace} also works inside cwd/args.",
+  boundWorkspace: "\u2192 {path}",
+  awaitingWorkspace: "waiting for the first session to pick a project",
   connected: "Connected",
   notSynced: "Not synced",
   failed: "failed",
@@ -636,6 +650,7 @@ function McpView() {
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-name", children: s.serverName }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-badge", children: s.transport }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-badge", title: s.managed ? void 0 : t("profileManagedHint"), children: s.managed ? t("managedBadge") : t("profileManagedBadge") }),
+        s.scope === "workspace" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-badge workspace", title: t("scopeWorkspaceHint"), children: t("scopeWorkspaceBadge") }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `smc-dot${dotCls(s)}` }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-spacer" }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "smc-btn", disabled: !s.managed, onClick: () => {
@@ -658,7 +673,8 @@ function McpView() {
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "smc-desc", children: s.transport === "stdio" ? `${s.command ?? ""} ${(s.args ?? []).join(" ")}` : s.url })
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "smc-desc", children: s.transport === "stdio" ? `${s.command ?? ""} ${(s.args ?? []).join(" ")}` : s.url }),
+      s.scope === "workspace" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "smc-desc", title: s.workspace ?? s.boundWorkspace, children: t("boundWorkspace", { path: s.workspace ?? s.boundWorkspace ?? t("awaitingWorkspace") }) })
     ] }, s.id))
   ] });
 }
@@ -666,6 +682,7 @@ function ServerForm({ server, onClose, onSaved }) {
   useLocale();
   const [name, setName] = (0, import_react.useState)(server?.serverName ?? "");
   const [transport, setTransport] = (0, import_react.useState)(server?.transport ?? "stdio");
+  const [scope, setScope] = (0, import_react.useState)(server?.scope ?? "global");
   const [command, setCommand] = (0, import_react.useState)(server?.command ?? "");
   const [args, setArgs] = (0, import_react.useState)((server?.args ?? []).join(" "));
   const [cwd, setCwd] = (0, import_react.useState)(server?.cwd ?? "");
@@ -676,7 +693,7 @@ function ServerForm({ server, onClose, onSaved }) {
       setError(t("serverNameInvalid"));
       return;
     }
-    const config = transport === "stdio" ? { serverName: name, transport, command, args: args.split(/\s+/).filter(Boolean), cwd } : { serverName: name, transport, url };
+    const config = transport === "stdio" ? { serverName: name, transport, scope, command, args: args.split(/\s+/).filter(Boolean), cwd } : { serverName: name, transport, scope, url };
     const call = server === null ? rpc("createMcpServer", { config }) : rpc("updateMcpServer", { id: server.id, config });
     void call.then(
       () => {
@@ -728,6 +745,16 @@ function ServerForm({ server, onClose, onSaved }) {
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { className: "smc-input", value: url, onChange: (e) => {
         setUrl(e.target.value);
       }, placeholder: "https://mcp.example.com/xxx" })
+    ] }),
+    transport === "stdio" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "smc-field", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-label", children: t("scopeLabel") }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("select", { className: "smc-select", value: scope, onChange: (e) => {
+        setScope(e.target.value);
+      }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "global", children: t("scopeGlobal") }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "workspace", children: t("scopeWorkspace") })
+      ] }),
+      scope === "workspace" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-desc", children: t("scopeWorkspaceHint") })
     ] }),
     error !== "" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "smc-error", children: error }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "smc-row", style: { justifyContent: "flex-end", gap: 8, marginTop: 8 }, children: [

@@ -1,5 +1,18 @@
 /** Transport discriminant of an `mcp-client` server. */
 export type McpTransport = 'stdio' | 'streamable-http';
+/**
+ * How a row's working directory is decided.
+ *
+ * `global` (default) — whatever `cwd` the row carries; an empty `cwd` inherits
+ * the harness process directory.
+ * `workspace` — the entry is (re)spawned with `cwd` bound to the workspace of
+ * the session that is working, so per-project servers (codegraph, language
+ * servers, per-repo tooling) look at the project the user actually has open
+ * instead of the launcher's directory.
+ */
+export type McpScope = 'global' | 'workspace';
+/** Placeholder replaced with the bound workspace path in `cwd` and `args`. */
+export declare const WORKSPACE_TOKEN = "{workspace}";
 /** Client-supplied MCP server config, normalized to the mcp-client shape. */
 export interface McpConfig {
     serverName: string;
@@ -9,10 +22,17 @@ export interface McpConfig {
     cwd?: string;
     url?: string;
     headers?: Record<string, string>;
+    /** Working-directory policy; see {@link McpScope}. */
+    scope?: McpScope;
 }
-/** One durable server row: the mcp-client config plus its enable/disable state. */
+/**
+ * One durable server row: the mcp-client config plus its enable/disable state,
+ * its working-directory policy, and the workspace it was last bound to.
+ */
 export interface StoredMcpServer extends McpConfig {
     disabled: boolean;
+    /** Host-managed: last workspace a `workspace`-scoped (or `{workspace}`-using) row was spawned for. */
+    boundWorkspace?: string;
 }
 /** Loader entry id of one server — the client surface and the UI both key on it. */
 export declare function mcpServerEntryId(serverName: string): string;
@@ -31,6 +51,29 @@ export declare function fullMcpConfig(input: McpConfig): Record<string, unknown>
  * a caller bug, never something to silently persist.
  */
 export declare function normalizeStoredServer(input: unknown): StoredMcpServer;
+/**
+ * The workspace a row should be spawned for, or undefined when it does not need
+ * one. `workspace`-scoped rows always want one; other rows want one only when
+ * their `cwd`/`args` carry the `{workspace}` token.
+ */
+export declare function workspaceBindingOf(row: StoredMcpServer, workspace?: string): string | undefined;
+/** Whether the row is tied to a workspace at all (scoped or token-using). */
+export declare function isWorkspaceBound(row: StoredMcpServer): boolean;
+/**
+ * The effective `cwd`/`args` for one row under a workspace, in the stored row's
+ * own shape (before {@link fullMcpConfig} fills defaults).
+ *
+ * A `workspace`-scoped row with no explicit `cwd` is pointed at the workspace
+ * itself — that is what makes `codegraph serve --mcp` (no `--path`) find the
+ * open project's `.codegraph/` index instead of the launcher's directory.
+ */
+export declare function effectiveStoredServer(row: StoredMcpServer, workspace?: string): StoredMcpServer;
+/**
+ * Whether a row can be spawned at all: a workspace-bound row must have a
+ * concrete workspace, and no `{workspace}` token may survive into the spawn
+ * arguments (a literal token would be handed to the server as a path).
+ */
+export declare function spawnableRow(row: StoredMcpServer, workspace?: string): boolean;
 /**
  * The center's durable MCP server registry. Reads tolerate an absent file;
  * writes are atomic (temp file + rename) so a crash mid-write can never leave a
@@ -77,6 +120,11 @@ export interface ReconcileReport {
  * Called once per process, after the loader is mounted: this is what turns the
  * durable registry back into connected MCP servers on a fresh DSH start. An id
  * that is already live is left alone — a row that a profile config file owns
- * keeps its own entry. One server that cannot start never blocks the others.
+ * keeps its own entry. A workspace-bound row with no workspace yet is skipped
+ * (the first `agent/pre-step` binds it); a row that cannot start never blocks
+ * the others.
+ *
+ * @param workspace - the workspace to bind workspace-scoped rows to, when one is
+ * already known (typically the row's own last binding, persisted at shutdown).
  */
-export declare function reconcileStoredServers(servers: readonly StoredMcpServer[], loader: McpLoaderLike, entryName: string, warn?: (format: unknown, ...param: unknown[]) => void): Promise<ReconcileReport>;
+export declare function reconcileStoredServers(servers: readonly StoredMcpServer[], loader: McpLoaderLike, entryName: string, warn?: (format: unknown, ...param: unknown[]) => void, workspace?: string): Promise<ReconcileReport>;
