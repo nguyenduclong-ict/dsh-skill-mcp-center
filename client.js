@@ -201,7 +201,7 @@ var zhDict = {
   disable: "\u505C\u7528",
   provider: "provider \xB7 {name}",
   addServer: "\uFF0B \u6DFB\u52A0 server",
-  hotApplied: "\u589E\u5220\u6539\u70ED\u751F\u6548\uFF0C\u514D\u91CD\u542F",
+  hotApplied: "\u589E\u5220\u6539\u70ED\u751F\u6548\uFF0C\u5199\u5165\u78C1\u76D8\uFF0C\u91CD\u542F\u4FDD\u7559",
   edit: "\u7F16\u8F91",
   remove: "\u5220\u9664",
   disableServer: "\u505C\u7528\uFF08\u65AD\u5F00\u5E76\u91CA\u653E context\uFF09",
@@ -223,6 +223,13 @@ var zhDict = {
   disabledToast: "\u5DF2\u505C\u7528 {name}\uFF08\u70ED\u751F\u6548\uFF09",
   skillToggled: "\u5DF2\u5207\u6362 {name}\uFF0C\u6A21\u578B catalog \u5373\u65F6\u751F\u6548",
   noMcpServer: "\u672A\u914D\u7F6E MCP server",
+  managedBadge: "\u5DF2\u6301\u4E45\u5316",
+  profileManagedBadge: "\u914D\u7F6E\u6587\u4EF6",
+  profileManagedHint: "\u8BE5 entry \u7531 profile \u914D\u7F6E\u6587\u4EF6\uFF08cordis.patch.yml\uFF09\u5B9A\u4E49\uFF0C\u8BF7\u76F4\u63A5\u7F16\u8F91\u8BE5\u6587\u4EF6\uFF1B\u672C\u9875\u53EA\u8BFB",
+  errMcpServerExists: "\u540C\u540D server \u5DF2\u5B58\u5728",
+  errMcpServerFileManaged: "\u8BE5 server \u7531\u914D\u7F6E\u6587\u4EF6\u7BA1\u7406\uFF0C\u8BF7\u7F16\u8F91 cordis.patch.yml",
+  errMcpServerNameInvalid: "serverName \u975E\u6CD5\uFF08[A-Za-z0-9_-]{1,32}\uFF09",
+  errMcpServerFailed: "\u64CD\u4F5C\u5931\u8D25\uFF1A{e}",
   connected: "\u5DF2\u8FDE\u63A5",
   notSynced: "\u672A\u540C\u6B65",
   failed: "failed",
@@ -256,7 +263,7 @@ var enDict = {
   disable: "Disable",
   provider: "provider \xB7 {name}",
   addServer: "\uFF0B Add server",
-  hotApplied: "hot-applied, no restart",
+  hotApplied: "hot-applied and written to disk, kept across restarts",
   edit: "Edit",
   remove: "Remove",
   disableServer: "Disable (disconnect & free context)",
@@ -278,6 +285,13 @@ var enDict = {
   disabledToast: "{name} disabled (hot-applied)",
   skillToggled: "Toggled {name}, model catalog updates live",
   noMcpServer: "No MCP server",
+  managedBadge: "persisted",
+  profileManagedBadge: "profile config",
+  profileManagedHint: "This entry is defined by a profile config file (cordis.patch.yml); edit that file instead \u2014 this page is read-only for it",
+  errMcpServerExists: "A server with this name already exists",
+  errMcpServerFileManaged: "This server is managed by a config file; edit cordis.patch.yml",
+  errMcpServerNameInvalid: "Invalid serverName ([A-Za-z0-9_-]{1,32})",
+  errMcpServerFailed: "Failed: {e}",
   connected: "Connected",
   notSynced: "Not synced",
   failed: "failed",
@@ -302,6 +316,19 @@ var enDict = {
 var rpc = async () => {
   throw new Error("skill-mcp-center: rpc not wired");
 };
+function mcpErrorText(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  switch (message) {
+    case "mcp-server-exists":
+      return t("errMcpServerExists");
+    case "mcp-server-file-managed":
+      return t("errMcpServerFileManaged");
+    case "mcp-server-name-invalid":
+      return t("errMcpServerNameInvalid");
+    default:
+      return t("errMcpServerFailed", { e: message });
+  }
+}
 var openFileRef = null;
 var FILE_REF_RE = /@("([^"]+)"|([^\s"@]+))/g;
 function looksLikePath(path) {
@@ -560,24 +587,32 @@ function McpView() {
   if (error !== null) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "smc-sub", children: t("loadFailed", { e: error }) });
   if (items === null) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "smc-sub", children: t("loading") });
   const toggle = (s) => {
+    if (!s.managed) {
+      showToast(t("profileManagedHint"), "error");
+      return;
+    }
     void rpc("setMcpServerEnabled", { id: s.id, enabled: s.disabled }).then(
       () => {
         load();
         showToast(t(s.disabled ? "enabledToast" : "disabledToast", { name: s.serverName }));
       },
       (e) => {
-        showToast(e instanceof Error ? e.message : String(e), "error");
+        showToast(mcpErrorText(e), "error");
       }
     );
   };
   const remove = (s) => {
+    if (!s.managed) {
+      showToast(t("profileManagedHint"), "error");
+      return;
+    }
     void rpc("removeMcpServer", { id: s.id }).then(
       () => {
         load();
         showToast(t("removed", { name: s.serverName }));
       },
       (e) => {
-        showToast(e instanceof Error ? e.message : String(e), "error");
+        showToast(mcpErrorText(e), "error");
       }
     );
   };
@@ -600,12 +635,13 @@ function McpView() {
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "smc-row", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-name", children: s.serverName }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-badge", children: s.transport }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-badge", title: s.managed ? void 0 : t("profileManagedHint"), children: s.managed ? t("managedBadge") : t("profileManagedBadge") }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `smc-dot${dotCls(s)}` }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-spacer" }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "smc-btn", onClick: () => {
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "smc-btn", disabled: !s.managed, onClick: () => {
           setEditing(s);
         }, children: t("edit") }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "smc-btn danger", onClick: () => {
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "smc-btn danger", disabled: !s.managed, onClick: () => {
           remove(s);
         }, children: t("remove") }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -613,7 +649,8 @@ function McpView() {
           {
             type: "button",
             className: `smc-toggle${!s.disabled ? " on" : ""}`,
-            title: s.disabled ? t("enableServer") : t("disableServer"),
+            disabled: !s.managed,
+            title: s.managed ? s.disabled ? t("enableServer") : t("disableServer") : t("profileManagedHint"),
             onClick: () => {
               toggle(s);
             },
@@ -647,7 +684,7 @@ function ServerForm({ server, onClose, onSaved }) {
         showToast(server === null ? t("added", { name }) : t("updated", { name }));
       },
       (e) => {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(mcpErrorText(e));
       }
     );
   };

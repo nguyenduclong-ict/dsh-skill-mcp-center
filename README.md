@@ -11,9 +11,20 @@ Skill 与 MCP 管理中心：在设置里管理 skills 与 MCP 服务器，右�
 ## Features / 功能
 
 - **Skill management / Skill 管理** — browse every skill by tier (system / user / workspace / runtime), toggle model invocation via the `disable-model-invocation` frontmatter (disk-backed skills only).
-- **MCP management / MCP 管理** — add / edit / remove `mcp-client` servers, enable/disable without deleting config, all **hot-applied** through `ctx.loader` (no restart).
+- **MCP management / MCP 管理** — add / edit / remove `mcp-client` servers, enable/disable without deleting config, all **hot-applied** through `ctx.loader` (no restart) **and persisted**: the definitions live in a durable registry and are rebuilt as live entries at every start, so they survive an app restart (v0.4.3 fix — a root loader entry alone is in-memory only).
 - **Live status / 实时状态** — a sidebar "MCP" tab (via `dsh-better-sidebar`) showing per-server connection state + tool count, polled while visible and following the session.
 - **Skin-compatible / 皮肤兼容** — every color uses `var(--dsw-*)` tokens.
+
+## MCP persistence / MCP 持久化
+
+The loader's root entry tree is in-memory (`Loader.write()` is a no-op), so MCP servers are stored by this plugin instead:
+
+| Item | Path |
+|---|---|
+| Durable registry | `$DSH_HOME/plugins/skill-mcp-center/mcp-servers.json` (`$DSH_HOME` = `~/.dsh`, or the app's own `harness` dir under DSH Desktop) |
+| Live entries | `mcp-client` loader entries created at start by `reconcileStoredServers()` |
+
+Every add / edit / remove / enable writes the registry first, then hot-applies the entry — a failed connect never loses the row, and a corrupt registry file is moved aside as `mcp-servers.json.corrupt-<ts>` instead of being silently dropped. Servers defined by a profile config file (`cordis.patch.yml`) are shown as read-only, because writing them back would rewrite that file.
 
 ## Install / 安装
 

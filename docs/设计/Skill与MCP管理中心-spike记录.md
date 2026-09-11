@@ -3,6 +3,8 @@
 > 日期：2026-08-17
 > 关联：`Skill与MCP管理中心-前置设计.md` §八
 > 结论：三点假设**全部验证通过**，其中 `create` 的热启动路径比文档 D4 的表述更精确（见 §1.3）。
+>
+> ⚠️ **2026-09-12 更正（v0.4.3）**：§1.2 里 `└─ group.tree.write()   // 持久化回 cordis.yml` 这一行**不成立**，见下方 §1.5。
 
 ---
 
@@ -36,6 +38,22 @@ ctx.loader.create({ id, name:'mcp-client', config })
 ### 1.4 边界（写入实现注意）
 
 `mcp-client` 的 `failOnStartupError` 默认 `false`：新增时如果 MCP server 连不上，**`create()` 仍返回成功**（fiber 是 active，进 reconnect loop）。所以 UI 不能用「create 成功」判断「已连接」，必须靠 §2 的工具数做二次确认——状态点绿/灰的判定依据不变。
+
+### 1.5 更正：根 entry 不落盘（缺陷「退出 DSH 后 MCP 配置被清空」的根因，v0.4.3 修复）
+
+上面那句「都通过 `tree.write()` 持久化回 cordis.yml」**是错的**——`tree.write()` 被调用不等于写了盘。`EntryTree.create(options, parent = null)` → `resolveGroup(null)` → **loader 自己的 root group**，其 `tree` 就是 `Loader` 实例，而 `@deepseek-ai/cordis-plugin-loader/src/index.ts` 写得很明确：
+
+```ts
+write() {
+  // Loader's root tree is in-memory; writes are no-ops.
+}
+```
+
+所以 v0.4.2 里 `ctx.loader.create({ ... })`（不传 parent）只产生**内存 entry**：当次进程内热连接可用，进程一退就彻底消失。DSH Desktop 每次启动都用 `dsh web --patch …` 重新组合 profile，磁盘上没有任何 MCP 行可以恢复——用户报告的「退出 DSH Desktop 再进来，MCP server 配置全没了」正是这个原因。
+
+**为什么不能改成往 include 树里写**：唯一 file-backed 的树是根 include（`<profile>/cordis.yml`），而 `Include.write()` 写的是 `root.data` —— `applyEntryPatches` **已经把 bundle patch 行合并进同一份列表**，一次写入就会把整棵组合树摊平进 `cordis.yml`；下次启动时 bundle patch 的 `insert`（list 形式、无 id 去重）会再插一遍同样的 id，触发 `duplicate loader entry id`，Harness 直接起不来。桌面端自己也因此只改 `cordis.patch.yml`（文本级 patch 层），不碰 `cordis.yml`。
+
+**v0.4.3 的修法**：插件自己持有 durable registry（`$DSH_HOME/plugins/skill-mcp-center/mcp-servers.json`，原子写入），`[Service.init]` 时用 `reconcileStoredServers()` 把每一行重建为 live entry，增删改一律「先写 registry，再热生效」。`managed` 标记把 registry 拥有的行与 `cordis.patch.yml` 定义的行分开：后者在设置页只读，避免经 include 树回写。
 
 ## 2. `ctx.tools` 枚举 MCP 工具数 —— ✅ 通过
 
@@ -79,6 +97,6 @@ ctx.inject(['betterSidebar'], (sidebarCtx) => {
 | 2 | `ctx.tools.schemas()` 枚举 `mcp__` 工具数 | ✅ | `ToolRuntime.schemas()` 返回全量 `ToolSchema[]` |
 | 3 | `registerTab` 的 `visible` 语义 | ✅ | `dsh-ssid-panels` 已用的 `component({visible})` |
 
-**额外确认**：`update` 改 config 走 `fiber.update(config)` 热更新（不重启 fiber）；`remove` 走 `_dispose()` 热下线。三条路径都 `tree.write()` 持久化。
+**额外确认**：`update` 改 config 走 `fiber.update(config)` 热更新（不重启 fiber）；`remove` 走 `_dispose()` 热下线。三条路径都调用 `tree.write()`——但 root tree 的 `write()` 是 no-op（见 §1.5），持久化由 v0.4.3 起的 durable registry 负责。
 
 **无阻塞项**，可直接进入实现（host SkillService / McpService + loopback RPC + client 设置分区 + 侧边栏 tab）。

@@ -181,7 +181,7 @@ const zhDict: Record<string, string> = {
   disable: '停用',
   provider: 'provider · {name}',
   addServer: '＋ 添加 server',
-  hotApplied: '增删改热生效，免重启',
+  hotApplied: '增删改热生效，写入磁盘，重启保留',
   edit: '编辑',
   remove: '删除',
   disableServer: '停用（断开并释放 context）',
@@ -203,6 +203,13 @@ const zhDict: Record<string, string> = {
   disabledToast: '已停用 {name}（热生效）',
   skillToggled: '已切换 {name}，模型 catalog 即时生效',
   noMcpServer: '未配置 MCP server',
+  managedBadge: '已持久化',
+  profileManagedBadge: '配置文件',
+  profileManagedHint: '该 entry 由 profile 配置文件（cordis.patch.yml）定义，请直接编辑该文件；本页只读',
+  errMcpServerExists: '同名 server 已存在',
+  errMcpServerFileManaged: '该 server 由配置文件管理，请编辑 cordis.patch.yml',
+  errMcpServerNameInvalid: 'serverName 非法（[A-Za-z0-9_-]{1,32}）',
+  errMcpServerFailed: '操作失败：{e}',
   connected: '已连接',
   notSynced: '未同步',
   failed: 'failed',
@@ -236,7 +243,7 @@ const enDict: Record<string, string> = {
   disable: 'Disable',
   provider: 'provider · {name}',
   addServer: '＋ Add server',
-  hotApplied: 'hot-applied, no restart',
+  hotApplied: 'hot-applied and written to disk, kept across restarts',
   edit: 'Edit',
   remove: 'Remove',
   disableServer: 'Disable (disconnect & free context)',
@@ -258,6 +265,13 @@ const enDict: Record<string, string> = {
   disabledToast: '{name} disabled (hot-applied)',
   skillToggled: 'Toggled {name}, model catalog updates live',
   noMcpServer: 'No MCP server',
+  managedBadge: 'persisted',
+  profileManagedBadge: 'profile config',
+  profileManagedHint: 'This entry is defined by a profile config file (cordis.patch.yml); edit that file instead — this page is read-only for it',
+  errMcpServerExists: 'A server with this name already exists',
+  errMcpServerFileManaged: 'This server is managed by a config file; edit cordis.patch.yml',
+  errMcpServerNameInvalid: 'Invalid serverName ([A-Za-z0-9_-]{1,32})',
+  errMcpServerFailed: 'Failed: {e}',
   connected: 'Connected',
   notSynced: 'Not synced',
   failed: 'failed',
@@ -302,6 +316,8 @@ interface McpServer {
   headers?: Record<string, string>
   disabled: boolean
   fiberPhase: string | null
+  /** Host-owned durable row (false = defined by a profile config file). */
+  managed: boolean
 }
 interface McpServerStatus {
   serverName: string
@@ -313,6 +329,20 @@ interface McpServerStatus {
 
 type Rpc = (endpoint: string, payload?: unknown) => Promise<unknown>
 let rpc: Rpc = async () => { throw new Error('skill-mcp-center: rpc not wired') }
+
+/**
+ * Localize a host MCP error. The host answers with stable codes; anything else
+ * is shown as-is so a real diagnostic is never swallowed.
+ */
+function mcpErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  switch (message) {
+    case 'mcp-server-exists': return t('errMcpServerExists')
+    case 'mcp-server-file-managed': return t('errMcpServerFileManaged')
+    case 'mcp-server-name-invalid': return t('errMcpServerNameInvalid')
+    default: return t('errMcpServerFailed', { e: message })
+  }
+}
 
 /** better-sidebar openFile(scope, path, title), wired when the peer is present. */
 let openFileRef: ((path: string, title?: string) => void) | null = null
@@ -557,15 +587,17 @@ function McpView() {
   if (error !== null) return <p className="smc-sub">{t('loadFailed', { e: error })}</p>
   if (items === null) return <p className="smc-sub">{t('loading')}</p>
   const toggle = (s: McpServer) => {
+    if (!s.managed) { showToast(t('profileManagedHint'), 'error'); return }
     void rpc('setMcpServerEnabled', { id: s.id, enabled: s.disabled }).then(
       () => { load(); showToast(t(s.disabled ? 'enabledToast' : 'disabledToast', { name: s.serverName })) },
-      e => { showToast(e instanceof Error ? e.message : String(e), 'error') },
+      e => { showToast(mcpErrorText(e), 'error') },
     )
   }
   const remove = (s: McpServer) => {
+    if (!s.managed) { showToast(t('profileManagedHint'), 'error'); return }
     void rpc('removeMcpServer', { id: s.id }).then(
       () => { load(); showToast(t('removed', { name: s.serverName })) },
-      e => { showToast(e instanceof Error ? e.message : String(e), 'error') },
+      e => { showToast(mcpErrorText(e), 'error') },
     )
   }
   const dotCls = (s: McpServer) => (s.fiberPhase === 'failed' ? ' failed' : (s.disabled ? ' idle' : ''))
@@ -582,14 +614,18 @@ function McpView() {
           <div className="smc-row">
             <span className="smc-name">{s.serverName}</span>
             <span className="smc-badge">{s.transport}</span>
+            <span className="smc-badge" title={s.managed ? undefined : t('profileManagedHint')}>
+              {s.managed ? t('managedBadge') : t('profileManagedBadge')}
+            </span>
             <span className={`smc-dot${dotCls(s)}`} />
             <span className="smc-spacer" />
-            <button type="button" className="smc-btn" onClick={() => { setEditing(s) }}>{t('edit')}</button>
-            <button type="button" className="smc-btn danger" onClick={() => { remove(s) }}>{t('remove')}</button>
+            <button type="button" className="smc-btn" disabled={!s.managed} onClick={() => { setEditing(s) }}>{t('edit')}</button>
+            <button type="button" className="smc-btn danger" disabled={!s.managed} onClick={() => { remove(s) }}>{t('remove')}</button>
             <button
               type="button"
               className={`smc-toggle${!s.disabled ? ' on' : ''}`}
-              title={s.disabled ? t('enableServer') : t('disableServer')}
+              disabled={!s.managed}
+              title={s.managed ? (s.disabled ? t('enableServer') : t('disableServer')) : t('profileManagedHint')}
               onClick={() => { toggle(s) }}
               aria-label={s.disabled ? t('enable') : t('disable')}
             />
@@ -618,7 +654,7 @@ function ServerForm({ server, onClose, onSaved }: { server: McpServer | null; on
     const call = server === null ? rpc('createMcpServer', { config }) : rpc('updateMcpServer', { id: server.id, config })
     void call.then(
       () => { onSaved(); showToast(server === null ? t('added', { name }) : t('updated', { name })) },
-      e => { setError(e instanceof Error ? e.message : String(e)) },
+      e => { setError(mcpErrorText(e)) },
     )
   }
   return (
