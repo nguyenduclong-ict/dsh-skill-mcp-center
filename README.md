@@ -13,6 +13,7 @@ Skill 与 MCP 管理中心：在设置里管理 skills 与 MCP 服务器，右�
 - **Skill management / Skill 管理** — browse every skill by tier (system / user / workspace / runtime), toggle model invocation via the `disable-model-invocation` frontmatter (disk-backed skills only).
 - **MCP management / MCP 管理** — add / edit / remove `mcp-client` servers, enable/disable without deleting config, all **hot-applied** through `ctx.loader` (no restart) **and persisted**: the definitions live in a durable registry and are rebuilt as live entries at every start, so they survive an app restart (v0.4.3 fix — a root loader entry alone is in-memory only).
 - **Workspace-scoped servers / 跟随 workspace** — a server can follow the project the session is working in: set its working directory to *follow workspace* (or put the `{workspace}` placeholder in `cwd`/`args`) and its entry is respawned with that path whenever the active project changes. This is what makes per-project servers such as `codegraph serve --mcp` look at the open project instead of the launcher's directory (v0.4.4).
+- **HTTP headers / HTTP 请求头** — a `streamable-http` server takes extra request headers (auth tokens, API keys) in the add/edit form: one `Name: value` per line. They are sent as `requestInit.headers` by `mcp-client`, persisted with the row, and shown as a count on the server card (v0.4.5).
 - **Live status / 实时状态** — a sidebar "MCP" tab (via `dsh-better-sidebar`) showing per-server connection state + tool count, polled while visible and following the session.
 - **Skin-compatible / 皮肤兼容** — every color uses `var(--dsw-*)` tokens.
 
@@ -42,6 +43,19 @@ The binding follows the session through the `agent/pre-step` waterfall (`agent.s
 { "serverName": "codegraph", "transport": "stdio", "scope": "workspace",
   "command": "codegraph", "args": ["serve", "--mcp"], "disabled": false }
 ```
+
+### HTTP headers / HTTP 请求头
+
+A `streamable-http` row can carry request headers, which is what authenticated remote servers need:
+
+```json
+{ "serverName": "remote", "transport": "streamable-http",
+  "url": "https://mcp.example.com/mcp",
+  "headers": { "Authorization": "Bearer <token>", "X-Api-Key": "<key>" },
+  "disabled": false }
+```
+
+In the form they are edited as one `Name: value` per line (blank lines and `#` comments ignored). The first colon ends the name, so a value may freely contain `:`, `/` and `=` — no escaping rule of its own. A line without a colon is reported instead of guessed at, so a token can never be persisted as a header *name*; clearing the box removes the headers again.
 
 ## Install / 安装
 

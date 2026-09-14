@@ -60,6 +60,9 @@ const CSS = `
 
 .smc-input { height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 1.5; outline: none; font-family: inherit; }
 .smc-input:focus { border-color: var(--dsw-alias-brand-primary); }
+.smc-textarea { min-height: 76px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 1.6; outline: none; resize: vertical; font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; box-sizing: border-box; width: 100%; }
+.smc-textarea:focus { border-color: var(--dsw-alias-brand-primary); }
+.smc-textarea::placeholder { color: var(--dsw-alias-label-caption); }
 .smc-select { height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 1.5; cursor: pointer; font-family: inherit; }
 .smc-form { border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; padding: 16px; margin-bottom: 14px; background: var(--dsw-alias-bg-layer-3); }
 .smc-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
@@ -192,6 +195,11 @@ const zhDict: Record<string, string> = {
   argsLabel: 'args（空格分隔）',
   cwdLabel: 'cwd（可选）',
   url: 'url',
+  headersLabel: 'headers（可选，每行一个 Name: value）',
+  headersHint: '作为 HTTP 请求头发送给服务器，例如 Authorization: Bearer <token>。',
+  headersInvalid: '第 {n} 行格式无效，需为 Name: value',
+  headersPlaceholder: 'Authorization: Bearer xxx\nX-Api-Key: yyy',
+  headersBadge: '{n} 个 header',
   cancel: '取消',
   add: '添加',
   save: '保存',
@@ -261,6 +269,11 @@ const enDict: Record<string, string> = {
   argsLabel: 'args (space-separated)',
   cwdLabel: 'cwd (optional)',
   url: 'url',
+  headersLabel: 'headers (optional, one Name: value per line)',
+  headersHint: 'Sent as HTTP request headers, e.g. Authorization: Bearer <token>.',
+  headersInvalid: 'Line {n} is invalid — use Name: value',
+  headersPlaceholder: 'Authorization: Bearer xxx\nX-Api-Key: yyy',
+  headersBadge: '{n} header(s)',
   cancel: 'Cancel',
   add: 'Add',
   save: 'Save',
@@ -364,6 +377,41 @@ function mcpErrorText(error: unknown): string {
 
 /** better-sidebar openFile(scope, path, title), wired when the peer is present. */
 let openFileRef: ((path: string, title?: string) => void) | null = null
+
+// ---- HTTP header editing ----
+/**
+ * Render a header map as the textarea text. The wire format is one
+ * `Name: value` per line (HTTP's own field syntax), which round-trips a value
+ * containing spaces or `=` without an escape rule of its own.
+ */
+function headersToText(headers?: Record<string, string>): string {
+  if (headers === undefined) return ''
+  return Object.entries(headers).map(([key, value]) => `${key}: ${value}`).join('\n')
+}
+
+/** One parsed header map, or the 1-based line number that could not be read. */
+type HeaderParse = { ok: true; headers: Record<string, string> } | { ok: false; line: number }
+
+/**
+ * Parse the textarea text back into a header map. Blank lines and `#` comments
+ * are skipped; any other line must split on `:` — a header name has no colon of
+ * its own, so the first one always ends the name. A malformed line is reported
+ * instead of guessed at, so a token can never be persisted as a header name.
+ */
+function parseHeaders(text: string): HeaderParse {
+  const headers: Record<string, string> = {}
+  const lines = text.split('\n')
+  for (let at = 0; at < lines.length; at += 1) {
+    const line = lines[at]!.trim()
+    if (line === '' || line.startsWith('#')) continue
+    const colon = line.indexOf(':')
+    if (colon <= 0) return { ok: false, line: at + 1 }
+    const key = line.slice(0, colon).trim()
+    if (key === '') return { ok: false, line: at + 1 }
+    headers[key] = line.slice(colon + 1).trim()
+  }
+  return { ok: true, headers }
+}
 
 // ---- file reference rendering ----
 // Match @path and @"path with spaces" mentions (rc.8 file-reference grammar
@@ -652,6 +700,11 @@ function McpView() {
             />
           </div>
           <div className="smc-desc">{s.transport === 'stdio' ? `${s.command ?? ''} ${(s.args ?? []).join(' ')}` : s.url}</div>
+          {s.transport !== 'stdio' && Object.keys(s.headers ?? {}).length > 0 && (
+            <div className="smc-desc" title={Object.keys(s.headers ?? {}).join(', ')}>
+              {t('headersBadge', { n: Object.keys(s.headers ?? {}).length })}
+            </div>
+          )}
           {s.scope === 'workspace' && (
             <div className="smc-desc" title={s.workspace ?? s.boundWorkspace}>
               {t('boundWorkspace', { path: s.workspace ?? s.boundWorkspace ?? t('awaitingWorkspace') })}
@@ -672,12 +725,18 @@ function ServerForm({ server, onClose, onSaved }: { server: McpServer | null; on
   const [args, setArgs] = useState((server?.args ?? []).join(' '))
   const [cwd, setCwd] = useState(server?.cwd ?? '')
   const [url, setUrl] = useState(server?.url ?? '')
+  const [headers, setHeaders] = useState(headersToText(server?.headers))
   const [error, setError] = useState('')
   const save = () => {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) { setError(t('serverNameInvalid')); return }
-    const config = transport === 'stdio'
-      ? { serverName: name, transport, scope, command, args: args.split(/\s+/).filter(Boolean), cwd }
-      : { serverName: name, transport, scope, url }
+    let config: Record<string, unknown>
+    if (transport === 'stdio') {
+      config = { serverName: name, transport, scope, command, args: args.split(/\s+/).filter(Boolean), cwd }
+    } else {
+      const parsed = parseHeaders(headers)
+      if (!parsed.ok) { setError(t('headersInvalid', { n: parsed.line })); return }
+      config = { serverName: name, transport, scope, url, headers: parsed.headers }
+    }
     const call = server === null ? rpc('createMcpServer', { config }) : rpc('updateMcpServer', { id: server.id, config })
     void call.then(
       () => { onSaved(); showToast(server === null ? t('added', { name }) : t('updated', { name })) },
@@ -713,10 +772,24 @@ function ServerForm({ server, onClose, onSaved }: { server: McpServer | null; on
           </div>
         </>
       ) : (
-        <div className="smc-field">
-          <span className="smc-label">{t('url')}</span>
-          <input className="smc-input" value={url} onChange={e => { setUrl(e.target.value) }} placeholder="https://mcp.example.com/xxx" />
-        </div>
+        <>
+          <div className="smc-field">
+            <span className="smc-label">{t('url')}</span>
+            <input className="smc-input" value={url} onChange={e => { setUrl(e.target.value) }} placeholder="https://mcp.example.com/xxx" />
+          </div>
+          <div className="smc-field">
+            <span className="smc-label">{t('headersLabel')}</span>
+            <textarea
+              className="smc-textarea"
+              value={headers}
+              onChange={e => { setHeaders(e.target.value) }}
+              placeholder={t('headersPlaceholder')}
+              spellCheck={false}
+              rows={3}
+            />
+            <span className="smc-desc">{t('headersHint')}</span>
+          </div>
+        </>
       )}
       {transport === 'stdio' && (
         <div className="smc-field">

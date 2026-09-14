@@ -173,6 +173,55 @@ describe('MCP 管理与持久化', () => {
     expect(web.options.config).toMatchObject({ transport: 'streamable-http', url: 'https://mcp.example.com/x' })
   })
 
+  it('http server 的 headers 跨重启保留，并原样进入 mcp-client 配置', async () => {
+    const storePath = await temporaryStore()
+    const headers = { Authorization: 'Bearer t0ken', 'X-Api-Key': 'abc 123' }
+    const first = await boot(storePath)
+    await first.service.createMcpServer({
+      serverName: 'web',
+      transport: 'streamable-http',
+      url: 'https://mcp.example.com/x',
+      headers,
+    })
+
+    // 写盘就是 mcp-client 的形状（headers 是它的 requestInit.headers 来源）
+    const onDisk = await registryOnDisk(storePath)
+    expect(onDisk.servers[0]).toMatchObject({ transport: 'streamable-http', headers })
+    expect(first.loader.mounted[0]!.options.config).toMatchObject({ headers })
+
+    // 新进程：重建的 entry 仍带着 headers，卡片也把它们暴露给编辑表单
+    const second = await boot(storePath)
+    const web = second.loader.mounted.find(entry => entry.id === 'mcp-web')!
+    expect(web.options.config).toMatchObject({ headers })
+    expect((await second.service.listMcpServers())[0]!.headers).toEqual(headers)
+  })
+
+  it('http server 不填 headers 时为空对象，编辑可清除已有 headers', async () => {
+    const storePath = await temporaryStore()
+    const { service } = await boot(storePath)
+    await service.createMcpServer({ serverName: 'web', transport: 'streamable-http', url: 'https://mcp.example.com/x' })
+    expect((await registryOnDisk(storePath)).servers[0]).not.toHaveProperty('headers')
+    // 卡片（来自 fullMcpConfig）把缺省补成 {}，表单据此渲染成空文本
+    expect((await service.listMcpServers())[0]!.headers).toEqual({})
+
+    await service.updateMcpServer('mcp-web', {
+      serverName: 'web',
+      transport: 'streamable-http',
+      url: 'https://mcp.example.com/x',
+      headers: { Authorization: 'Bearer t' },
+    })
+    expect((await registryOnDisk(storePath)).servers[0]).toMatchObject({ headers: { Authorization: 'Bearer t' } })
+
+    // 清空表单提交 {} → 落盘的 row 不再有 headers
+    await service.updateMcpServer('mcp-web', {
+      serverName: 'web',
+      transport: 'streamable-http',
+      url: 'https://mcp.example.com/x',
+      headers: {},
+    })
+    expect((await registryOnDisk(storePath)).servers[0]).not.toHaveProperty('headers')
+  })
+
   it('停用状态跨重启保留（重建时保持 disabled，不发起连接）', async () => {
     const storePath = await temporaryStore()
     const first = await boot(storePath)

@@ -84,6 +84,9 @@ var CSS = `
 
 .smc-input { height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 1.5; outline: none; font-family: inherit; }
 .smc-input:focus { border-color: var(--dsw-alias-brand-primary); }
+.smc-textarea { min-height: 76px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 1.6; outline: none; resize: vertical; font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; box-sizing: border-box; width: 100%; }
+.smc-textarea:focus { border-color: var(--dsw-alias-brand-primary); }
+.smc-textarea::placeholder { color: var(--dsw-alias-label-caption); }
 .smc-select { height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 1.5; cursor: pointer; font-family: inherit; }
 .smc-form { border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; padding: 16px; margin-bottom: 14px; background: var(--dsw-alias-bg-layer-3); }
 .smc-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
@@ -212,6 +215,11 @@ var zhDict = {
   argsLabel: "args\uFF08\u7A7A\u683C\u5206\u9694\uFF09",
   cwdLabel: "cwd\uFF08\u53EF\u9009\uFF09",
   url: "url",
+  headersLabel: "headers\uFF08\u53EF\u9009\uFF0C\u6BCF\u884C\u4E00\u4E2A Name: value\uFF09",
+  headersHint: "\u4F5C\u4E3A HTTP \u8BF7\u6C42\u5934\u53D1\u9001\u7ED9\u670D\u52A1\u5668\uFF0C\u4F8B\u5982 Authorization: Bearer <token>\u3002",
+  headersInvalid: "\u7B2C {n} \u884C\u683C\u5F0F\u65E0\u6548\uFF0C\u9700\u4E3A Name: value",
+  headersPlaceholder: "Authorization: Bearer xxx\nX-Api-Key: yyy",
+  headersBadge: "{n} \u4E2A header",
   cancel: "\u53D6\u6D88",
   add: "\u6DFB\u52A0",
   save: "\u4FDD\u5B58",
@@ -281,6 +289,11 @@ var enDict = {
   argsLabel: "args (space-separated)",
   cwdLabel: "cwd (optional)",
   url: "url",
+  headersLabel: "headers (optional, one Name: value per line)",
+  headersHint: "Sent as HTTP request headers, e.g. Authorization: Bearer <token>.",
+  headersInvalid: "Line {n} is invalid \u2014 use Name: value",
+  headersPlaceholder: "Authorization: Bearer xxx\nX-Api-Key: yyy",
+  headersBadge: "{n} header(s)",
   cancel: "Cancel",
   add: "Add",
   save: "Save",
@@ -344,6 +357,24 @@ function mcpErrorText(error) {
   }
 }
 var openFileRef = null;
+function headersToText(headers) {
+  if (headers === void 0) return "";
+  return Object.entries(headers).map(([key, value]) => `${key}: ${value}`).join("\n");
+}
+function parseHeaders(text) {
+  const headers = {};
+  const lines = text.split("\n");
+  for (let at = 0; at < lines.length; at += 1) {
+    const line = lines[at].trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const colon = line.indexOf(":");
+    if (colon <= 0) return { ok: false, line: at + 1 };
+    const key = line.slice(0, colon).trim();
+    if (key === "") return { ok: false, line: at + 1 };
+    headers[key] = line.slice(colon + 1).trim();
+  }
+  return { ok: true, headers };
+}
 var FILE_REF_RE = /@("([^"]+)"|([^\s"@]+))/g;
 function looksLikePath(path) {
   if (path.includes("\\")) return true;
@@ -674,6 +705,7 @@ function McpView() {
         )
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "smc-desc", children: s.transport === "stdio" ? `${s.command ?? ""} ${(s.args ?? []).join(" ")}` : s.url }),
+      s.transport !== "stdio" && Object.keys(s.headers ?? {}).length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "smc-desc", title: Object.keys(s.headers ?? {}).join(", "), children: t("headersBadge", { n: Object.keys(s.headers ?? {}).length }) }),
       s.scope === "workspace" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "smc-desc", title: s.workspace ?? s.boundWorkspace, children: t("boundWorkspace", { path: s.workspace ?? s.boundWorkspace ?? t("awaitingWorkspace") }) })
     ] }, s.id))
   ] });
@@ -687,13 +719,24 @@ function ServerForm({ server, onClose, onSaved }) {
   const [args, setArgs] = (0, import_react.useState)((server?.args ?? []).join(" "));
   const [cwd, setCwd] = (0, import_react.useState)(server?.cwd ?? "");
   const [url, setUrl] = (0, import_react.useState)(server?.url ?? "");
+  const [headers, setHeaders] = (0, import_react.useState)(headersToText(server?.headers));
   const [error, setError] = (0, import_react.useState)("");
   const save = () => {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) {
       setError(t("serverNameInvalid"));
       return;
     }
-    const config = transport === "stdio" ? { serverName: name, transport, scope, command, args: args.split(/\s+/).filter(Boolean), cwd } : { serverName: name, transport, scope, url };
+    let config;
+    if (transport === "stdio") {
+      config = { serverName: name, transport, scope, command, args: args.split(/\s+/).filter(Boolean), cwd };
+    } else {
+      const parsed = parseHeaders(headers);
+      if (!parsed.ok) {
+        setError(t("headersInvalid", { n: parsed.line }));
+        return;
+      }
+      config = { serverName: name, transport, scope, url, headers: parsed.headers };
+    }
     const call = server === null ? rpc("createMcpServer", { config }) : rpc("updateMcpServer", { id: server.id, config });
     void call.then(
       () => {
@@ -740,11 +783,30 @@ function ServerForm({ server, onClose, onSaved }) {
           setCwd(e.target.value);
         }, placeholder: "" })
       ] })
-    ] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "smc-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-label", children: t("url") }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { className: "smc-input", value: url, onChange: (e) => {
-        setUrl(e.target.value);
-      }, placeholder: "https://mcp.example.com/xxx" })
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "smc-field", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-label", children: t("url") }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { className: "smc-input", value: url, onChange: (e) => {
+          setUrl(e.target.value);
+        }, placeholder: "https://mcp.example.com/xxx" })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "smc-field", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-label", children: t("headersLabel") }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+          "textarea",
+          {
+            className: "smc-textarea",
+            value: headers,
+            onChange: (e) => {
+              setHeaders(e.target.value);
+            },
+            placeholder: t("headersPlaceholder"),
+            spellCheck: false,
+            rows: 3
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-desc", children: t("headersHint") })
+      ] })
     ] }),
     transport === "stdio" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "smc-field", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "smc-label", children: t("scopeLabel") }),
